@@ -37,7 +37,26 @@
           "capture_fps": 30,
           "flip_method": 0,
           "pipeline_type": "nvargus_bgr",
-          "camera_profile": "default"
+          "camera_profile": "default",
+          "process_isolation": {
+            "enabled": true,
+            "read_wait_timeout_sec": 0.08,
+            "stall_timeout_sec": 0.75,
+            "open_timeout_sec": 10.0,
+            "healthy_frames": 3,
+            "max_recovery_attempts": 3,
+            "startup_auto_recovery": true,
+            "startup_recovery_timeout_sec": 80.0,
+            "worker_stop_timeout_sec": 0.6,
+            "monitor_interval_sec": 0.1,
+            "restart_nvargus_daemon": true,
+            "daemon_restart_command": "sudo -n /usr/bin/systemctl restart nvargus-daemon",
+            "daemon_restart_timeout_sec": 10.0,
+            "daemon_settle_sec": 1.2,
+            "daemon_restart_required": true,
+            "status_path": "data/runtime/camera_process_status.json",
+            "request_path": "data/runtime/camera_process_request.json"
+          }
         }
       ]
     }

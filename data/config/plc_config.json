@@ -8,7 +8,11 @@
     "parity": "N",
     "stopbits": 1,
     "timeout": 1,
-    "reconnect_interval_sec": 1.0
+    "reconnect_interval_sec": 1.0,
+    "require_reset_after_runtime_disconnect": true,
+    "require_initial_rx": true,
+    "rx_watchdog_sec": 5.0,
+    "rx_watchdog_startup_grace_sec": 20.0
   },
   "modbus": {
     "slave_id": 1
@@ -21,8 +25,8 @@
     "vision_ready": 204
   },
   "vision_ready": {
-  "ready_value": 100,
-  "not_ready_value": 0
+    "ready_value": 100,
+    "not_ready_value": 0
   },
   "heartbeat": {
     "interval_sec": 0.5,

@@ -16,6 +16,10 @@ DEFAULT_PLC_CONFIG: Dict[str, Any] = {
         "stopbits": 1,
         "timeout": 0.1,
         "reconnect_interval_sec": 1.0,
+        "require_reset_after_runtime_disconnect": True,
+        "require_initial_rx": True,
+        "rx_watchdog_sec": 5.0,
+        "rx_watchdog_startup_grace_sec": 15.0,
     },
 
     "modbus": {

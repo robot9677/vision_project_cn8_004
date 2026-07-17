@@ -164,6 +164,28 @@ class CameraProcessProxy:
         self.max_recovery_attempts = max(
             1, int(cfg.get("max_recovery_attempts", 2))
         )
+        self.startup_auto_recovery = bool(
+            cfg.get("startup_auto_recovery", True)
+        )
+        default_startup_recovery_timeout = (
+            self.max_recovery_attempts
+            * (
+                self.open_timeout_sec
+                + max(2.0, float(cfg.get("daemon_restart_timeout_sec", 10.0)))
+                + max(0.0, float(cfg.get("daemon_settle_sec", 1.2)))
+                + 1.0
+            )
+            + 5.0
+        )
+        self.startup_recovery_timeout_sec = max(
+            self.open_timeout_sec,
+            float(
+                cfg.get(
+                    "startup_recovery_timeout_sec",
+                    default_startup_recovery_timeout,
+                )
+            ),
+        )
         self.worker_stop_timeout_sec = max(
             0.1, float(cfg.get("worker_stop_timeout_sec", 0.6))
         )
@@ -413,10 +435,33 @@ class CameraProcessProxy:
         self._spawn_worker()
         if not self._wait_for_healthy_frames(self.open_timeout_sec):
             self._drain_worker_events()
-            error = self._last_worker_error or "camera worker did not deliver healthy frames"
+            initial_error = (
+                self._last_worker_error
+                or "camera worker did not deliver healthy frames"
+            )
             self._stop_worker(force=True)
-            self._set_state(STATE_FAILED, error)
-            raise RuntimeError(error)
+            self._set_state(STATE_FAILED, initial_error)
+
+            if self.startup_auto_recovery:
+                try:
+                    self.recover_blocking(
+                        reason=(
+                            "initial camera startup failed: "
+                            f"{initial_error}"
+                        ),
+                        timeout_sec=self.startup_recovery_timeout_sec,
+                    )
+                    self._ensure_monitor_thread()
+                    return
+                except Exception as recovery_error:
+                    detail = (
+                        f"initial camera open failed: {initial_error}; "
+                        f"automatic startup recovery failed: {recovery_error}"
+                    )
+                    self._set_state(STATE_FAILED, detail)
+                    raise RuntimeError(detail)
+
+            raise RuntimeError(initial_error)
 
         self._set_state(STATE_RUNNING, "capture worker ready")
         self._ensure_monitor_thread()

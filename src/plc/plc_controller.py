@@ -84,6 +84,14 @@ class DisabledPlcController:
             "last_inspect_elapsed_ms": 0,
             "serial_open": False,
             "comm_fault_active": False,
+            "comm_reset_required": False,
+            "ever_connected": False,
+            "link_verified": False,
+            "ever_link_verified": False,
+            "reconnect_attempt_count": 0,
+            "last_connect_epoch": None,
+            "last_disconnect_epoch": None,
+            "last_valid_rx_epoch": None,
             "slave_id": 0,
             "port": "",
             "rx_count": 0,
@@ -105,6 +113,12 @@ class DisabledPlcController:
 
     def prepare_reset(self, reset_heartbeat: bool = False):
         pass
+
+    def set_recovering(self, code: int = 0, detail: str = ""):
+        pass
+
+    def complete_comm_recovery(self) -> bool:
+        return False
 
     def trace_application_event(
         self,
@@ -162,6 +176,20 @@ class ModbusRtuSlaveController:
         self.reconnect_interval_sec = max(
             0.1,
             float(serial_cfg.get("reconnect_interval_sec", 1.0)),
+        )
+        self.require_reset_after_runtime_disconnect = bool(
+            serial_cfg.get("require_reset_after_runtime_disconnect", True)
+        )
+        self.require_initial_rx = bool(
+            serial_cfg.get("require_initial_rx", True)
+        )
+        self.rx_watchdog_sec = max(
+            0.0,
+            float(serial_cfg.get("rx_watchdog_sec", 5.0)),
+        )
+        self.rx_watchdog_startup_grace_sec = max(
+            self.rx_watchdog_sec,
+            float(serial_cfg.get("rx_watchdog_startup_grace_sec", 15.0)),
         )
 
         self.slave_id = int(modbus_cfg.get("slave_id", 1))
@@ -237,7 +265,16 @@ class ModbusRtuSlaveController:
         self._comm_event_lock = threading.Lock()
         self._comm_events = []
         self._comm_fault_active = False
+        self._comm_reset_required = False
+        self._ever_connected = False
+        self._link_verified = False
+        self._ever_link_verified = False
         self._last_reconnect_ts = 0.0
+        self._reconnect_attempt_count = 0
+        self._serial_open_epoch = None
+        self._last_connect_epoch = None
+        self._last_disconnect_epoch = None
+        self._last_valid_rx_epoch = None
 
         trace_cfg = cfg.get("live_trace", {}) or {}
         self.trace_enabled = bool(trace_cfg.get("enabled", False))
@@ -603,10 +640,20 @@ class ModbusRtuSlaveController:
         self,
         error_code: int,
         message: str,
+        *,
+        event_type: str = "fault",
+        reset_required: Optional[bool] = None,
     ):
         event = {
+            "event_type": str(event_type),
             "error_code": int(error_code),
             "message": str(message),
+            "reset_required": bool(
+                self._comm_reset_required
+                if reset_required is None
+                else reset_required
+            ),
+            "serial_open": bool(self.is_connected()),
             "timestamp": datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S.%f"
             )[:-3],
@@ -653,20 +700,28 @@ class ModbusRtuSlaveController:
             return
 
         if not self._comm_fault_active:
-            self._push_comm_event(
-                error_code=error_code,
-                message=message,
-            )
-
             self._comm_fault_active = True
+            self._comm_reset_required = bool(
+                self._ever_link_verified
+                and self.require_reset_after_runtime_disconnect
+            )
+            self._last_disconnect_epoch = time.time()
 
-            # 통신 복구 후 PLC가 읽을 수 있도록 내부 D201=3 유지
-            self.set_error(
+            self.set_recovering(
                 code=error_code,
                 detail=message,
             )
+            self._push_comm_event(
+                error_code=error_code,
+                message=message,
+                event_type="fault",
+                reset_required=self._comm_reset_required,
+            )
 
-        print(f"[PLC] communication error: {message}")
+        print(
+            f"[PLC] communication error: {message} "
+            f"reset_required={self._comm_reset_required}"
+        )
 
     def _open_serial(self, initial: bool = False) -> bool:
         if self._stop.is_set():
@@ -680,6 +735,7 @@ class ModbusRtuSlaveController:
             return False
 
         try:
+            self._reconnect_attempt_count += 1
             opened_serial = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
@@ -699,22 +755,77 @@ class ModbusRtuSlaveController:
                 pass
 
             self._ser = opened_serial
+            now = time.time()
+            self._serial_open_epoch = now
+            self._last_connect_epoch = now
+            self._last_valid_rx_epoch = None
+            self._link_verified = False
+            self._reconnect_attempt_count = 0
 
             was_fault = self._comm_fault_active
-            self._comm_fault_active = False
+            first_connection = not self._ever_connected
+            self._ever_connected = True
+            self._last_cmd_seen = self.CMD_NONE
 
-            if was_fault:
+            if was_fault and self._comm_reset_required:
+                self.set_recovering(
+                    code=self.last_error_code or 71,
+                    detail=(
+                        self.last_error_detail
+                        or "PLC communication restored; D200=3 reset required"
+                    ),
+                )
                 print(
                     f"[PLC] serial reconnected: {self.port} "
-                    f"- D201 remains ERROR until D200=3"
+                    f"- D201 remains BUSY until D200=3"
                 )
+                self._push_comm_event(
+                    error_code=self.last_error_code or 71,
+                    message="PLC serial communication restored; D200=3 reset required",
+                    event_type="reconnected_reset_required",
+                    reset_required=True,
+                )
+            else:
+                self._comm_fault_active = False
+                self._comm_reset_required = False
+                existing_non_comm_error = bool(
+                    self.last_error_code not in (0, 70, 71)
+                )
+                if self.last_error_code in (70, 71):
+                    self.last_error_code = 0
+                    self.last_error_detail = ""
+                if was_fault:
+                    if not existing_non_comm_error:
+                        self.set_busy()
+                    print(
+                        f"[PLC] serial reconnected automatically: {self.port}"
+                    )
+                    self._push_comm_event(
+                        error_code=(
+                            int(self.last_error_code)
+                            if existing_non_comm_error
+                            else 0
+                        ),
+                        message=(
+                            "PLC serial restored; existing vision error remains"
+                            if existing_non_comm_error
+                            else "PLC serial communication restored automatically"
+                        ),
+                        event_type=(
+                            "reconnected_existing_error"
+                            if existing_non_comm_error
+                            else "reconnected"
+                        ),
+                        reset_required=False,
+                    )
 
             self._trace_event(
                 direction="SYSTEM",
                 event="SERIAL_RECONNECTED" if was_fault else "SERIAL_OPEN",
                 summary=(
                     f"port={self.port} baud={self.baudrate} "
-                    f"slave_id={self.slave_id}"
+                    f"slave_id={self.slave_id} first_connection={first_connection} "
+                    f"reset_required={self._comm_reset_required}"
                 ),
             )
 
@@ -890,6 +1001,53 @@ class ModbusRtuSlaveController:
             f"elapsed_ms={self.last_inspect_elapsed_ms}"
         )
 
+    def set_recovering(self, code: int = 0, detail: str = ""):
+        self.set_vision_ready(False)
+        self.last_error_code = int(code)
+        self.last_error_detail = str(detail or "")
+        self._set_reg(self.reg_status, self.STATUS_BUSY)
+        self._trace_event(
+            direction="SYSTEM",
+            event="RECOVERY_BUSY",
+            summary=(
+                f"code={self.last_error_code} "
+                f"detail={self.last_error_detail}"
+            ),
+            extra={
+                "error_code": int(self.last_error_code),
+                "error_detail": str(self.last_error_detail),
+                "comm_reset_required": bool(self._comm_reset_required),
+            },
+        )
+
+    def complete_comm_recovery(self) -> bool:
+        if not self.is_connected():
+            return False
+        if self.require_initial_rx and not self._link_verified:
+            return False
+
+        previous_code = int(self.last_error_code)
+        previous_detail = str(self.last_error_detail)
+        self._comm_fault_active = False
+        self._comm_reset_required = False
+        if previous_code in (70, 71):
+            self.last_error_code = 0
+            self.last_error_detail = ""
+
+        self._trace_event(
+            direction="SYSTEM",
+            event="COMM_RECOVERY_COMPLETED",
+            summary=(
+                f"serial communication recovery completed "
+                f"previous_code={previous_code}"
+            ),
+            extra={
+                "previous_error_code": previous_code,
+                "previous_error_detail": previous_detail,
+            },
+        )
+        return True
+
     def set_error(self, code: int = 99, detail: str = ""):
         self.set_vision_ready(False)
         # D202의 기존 OK/NG 값은 유지하고 D201만 Error로 변경
@@ -964,6 +1122,14 @@ class ModbusRtuSlaveController:
             "last_inspect_elapsed_ms": int(self.last_inspect_elapsed_ms),
             "serial_open": self.is_connected(),
             "comm_fault_active": bool(self._comm_fault_active),
+            "comm_reset_required": bool(self._comm_reset_required),
+            "ever_connected": bool(self._ever_connected),
+            "link_verified": bool(self._link_verified),
+            "ever_link_verified": bool(self._ever_link_verified),
+            "reconnect_attempt_count": int(self._reconnect_attempt_count),
+            "last_connect_epoch": self._last_connect_epoch,
+            "last_disconnect_epoch": self._last_disconnect_epoch,
+            "last_valid_rx_epoch": self._last_valid_rx_epoch,
             "slave_id": int(self.slave_id),
             "port": str(self.port),
             "rx_count": int(self._rx_count),
@@ -1074,6 +1240,31 @@ class ModbusRtuSlaveController:
                 time.sleep(0.05)
                 continue
 
+            if self.rx_watchdog_sec > 0:
+                now = time.time()
+                reference = (
+                    self._last_valid_rx_epoch
+                    if self._last_valid_rx_epoch is not None
+                    else self._serial_open_epoch
+                )
+                watchdog_limit = (
+                    self.rx_watchdog_sec
+                    if self._last_valid_rx_epoch is not None
+                    else self.rx_watchdog_startup_grace_sec
+                )
+                if (
+                    reference is not None
+                    and (now - float(reference)) > watchdog_limit
+                ):
+                    self._mark_comm_error(
+                        error_code=71,
+                        message=(
+                            "PLC RX watchdog timeout: "
+                            f"no valid Modbus request for {now - float(reference):.2f} sec"
+                        ),
+                    )
+                    continue
+
             try:
                 b1 = self._read_exact(1)
                 if not b1:
@@ -1147,6 +1338,25 @@ class ModbusRtuSlaveController:
                         frame=frame,
                     )
                     continue
+
+                first_verified_rx = not self._link_verified
+                self._last_valid_rx_epoch = time.time()
+                self._link_verified = True
+                self._ever_link_verified = True
+
+                if first_verified_rx:
+                    self._trace_event(
+                        direction="SYSTEM",
+                        event="PLC_LINK_VERIFIED",
+                        summary="first valid Modbus request received",
+                    )
+                    if not self._comm_reset_required:
+                        self._push_comm_event(
+                            error_code=0,
+                            message="PLC link verified by valid Modbus request",
+                            event_type="link_verified",
+                            reset_required=False,
+                        )
 
                 if func in (3, 4):
                     self._handle_read_holding(addr, frame)

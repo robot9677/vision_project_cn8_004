@@ -449,6 +449,7 @@ class VisionApp:
         self._camera_recovery_request_id = ""
         self._pending_plc_camera_command = None
         self._camera_recovery_soak_retry = False
+        self._plc_auto_reconnect_pending = False
 
     def _get_primary_anchor_roi_id(self):
         align_cfg = self.product_profile.get("align", {}) or {}
@@ -1134,16 +1135,29 @@ class VisionApp:
         elif state == "FAILED":
             if previous != "FAILED":
                 detail = str(status.get("detail", "camera process recovery failed"))
+                try:
+                    plc_snapshot = self.plc.get_state_snapshot()
+                    active_error_code = int(plc_snapshot.get("error_code", 0))
+                except Exception:
+                    active_error_code = 0
+
                 st.camera_error_latched = True
                 st.camera_read_blocked = True
-                st.status = "CAMERA AUTO RECOVERY FAILED: PLC RESET REQUIRED"
-                self._save_plc_error_event(
-                    event_type="CAMERA_AUTO_RECOVERY_FAILED",
-                    error_code=11,
-                    message="Isolated camera process recovery failed",
-                    exception=RuntimeError(detail),
-                )
-                self.plc.set_error(code=11, detail=detail)
+
+                # Initial camera startup recovery failure is already logged as
+                # CAMERA_INIT_FAILED(10). Do not overwrite it with runtime code 11.
+                if active_error_code == 10:
+                    st.status = "CAMERA INIT AUTO RECOVERY FAILED: PLC RESET REQUIRED"
+                else:
+                    st.status = "CAMERA AUTO RECOVERY FAILED: PLC RESET REQUIRED"
+                    self._save_plc_error_event(
+                        event_type="CAMERA_AUTO_RECOVERY_FAILED",
+                        error_code=11,
+                        message="Isolated camera process recovery failed",
+                        exception=RuntimeError(detail),
+                    )
+                    self.plc.set_error(code=11, detail=detail)
+
                 if st.test_error_active and st.test_error_type == "camera":
                     st.test_error_phase = "RECOVERY_FAILED"
                     st.test_error_result = "FAIL"
@@ -2288,31 +2302,108 @@ class VisionApp:
             if event is None:
                 return
 
-            error_code = int(
-                event.get("error_code", 71)
-            )
+            event_type = str(event.get("event_type", "fault") or "fault")
+            error_code = int(event.get("error_code", 71))
             message = str(
-                event.get(
-                    "message",
-                    "PLC communication error",
+                event.get("message", "PLC communication event")
+            )
+            reset_required = bool(event.get("reset_required", False))
+
+            if event_type == "fault":
+                self._plc_auto_reconnect_pending = False
+                self._set_plc_vision_ready(False, "PLC_COMM_RECOVERING")
+                self._save_plc_error_event(
+                    event_type="PLC_COMMUNICATION_ERROR",
+                    error_code=error_code,
+                    message=message,
                 )
-            )
+                self.plc.set_recovering(
+                    code=error_code,
+                    detail=message,
+                )
+                self.state.status = (
+                    "PLC COMM RECOVERY: RECONNECTING / D201=BUSY"
+                )
+                continue
 
-            self._save_plc_error_event(
-                event_type="PLC_COMMUNICATION_ERROR",
-                error_code=error_code,
-                message=message,
-            )
+            if event_type == "reconnected_reset_required" or reset_required:
+                self._plc_auto_reconnect_pending = False
+                self.plc.set_busy()
+                self.state.status = (
+                    "PLC COMM RESTORED: D200=3 RESET REQUIRED"
+                )
+                continue
 
-            # 통신 복구 후 PLC에서 읽을 수 있도록 D201=3 유지
-            self.plc.set_error(
-                code=error_code,
-                detail=message,
-            )
+            if event_type == "reconnected_existing_error":
+                self._plc_auto_reconnect_pending = False
+                self.state.status = (
+                    "PLC COMM RESTORED: EXISTING VISION ERROR REMAINS"
+                )
+                continue
 
-            self.state.status = (
-                f"PLC COMM ERROR {error_code}: RESET REQUIRED"
+            if event_type in ("reconnected", "link_verified"):
+                try:
+                    current_snapshot = self.plc.get_state_snapshot()
+                    current_status = int(current_snapshot.get("status", 0))
+                    current_error_code = int(
+                        current_snapshot.get("error_code", 0)
+                    )
+                except Exception:
+                    current_status = 0
+                    current_error_code = 0
+
+                if (
+                    current_status == 3
+                    and current_error_code not in (0, 70, 71)
+                ):
+                    self._plc_auto_reconnect_pending = False
+                    self.state.status = (
+                        "PLC COMM RESTORED: EXISTING VISION ERROR REMAINS"
+                    )
+                    continue
+
+                self._plc_auto_reconnect_pending = True
+                self.plc.set_busy()
+                self.state.status = (
+                    "PLC COMM RESTORED: VISION HEALTH CHECK"
+                )
+
+    def _complete_auto_plc_reconnect_if_ready(self):
+        if not self._plc_auto_reconnect_pending:
+            return
+
+        st = self.state
+        try:
+            snapshot = self.plc.get_state_snapshot()
+        except Exception:
+            return
+
+        if not bool(snapshot.get("serial_open", False)):
+            return
+        if not bool(snapshot.get("link_verified", False)):
+            return
+        if bool(snapshot.get("comm_reset_required", False)):
+            self._plc_auto_reconnect_pending = False
+            return
+        if st.camera_error_latched or st.light_error_latched:
+            return
+        if st.plc_shutdown_started or self._camera_is_recovering():
+            return
+        if not self._camera_frame_healthy(max_age_sec=1.0):
+            return
+
+        try:
+            if not self.plc.complete_comm_recovery():
+                return
+            self.plc.reset_to_ready(reset_heartbeat=False)
+            self._plc_auto_reconnect_pending = False
+            st.status = "PLC COMM AUTO RECOVERY: READY"
+            self.plc.trace_application_event(
+                event="PLC_COMM_AUTO_RECOVERY_COMPLETED",
+                summary="serial reconnected and vision health verified",
             )
+        except Exception as e:
+            print("[PLC] automatic communication recovery completion failed:", e)
 
     def _get_plc_error_test_cfg(self) -> Dict[str, Any]:
         cfg = self.plc_cfg.get("error_test", {}) or {}
@@ -2856,6 +2947,8 @@ class VisionApp:
         snapshot = self.plc.get_state_snapshot()
         if not bool(snapshot.get("serial_open", False)):
             raise RuntimeError("PLC serial is not open")
+        if not bool(snapshot.get("link_verified", False)):
+            raise RuntimeError("PLC link has not received a valid Modbus request")
         if bool(snapshot.get("comm_fault_active", False)):
             raise RuntimeError("PLC communication fault is still active")
         return (
@@ -2971,6 +3064,7 @@ class VisionApp:
         )
 
         self.plc.prepare_reset(reset_heartbeat=reset_heartbeat)
+        self.plc.set_busy()
         self._save_plc_test_event(
             phase="RECOVERING",
             result="",
@@ -3030,6 +3124,11 @@ class VisionApp:
                 st.camera_error_latched = False
 
             elif error_type == "plc_comm":
+                complete_comm_recovery = getattr(
+                    self.plc, "complete_comm_recovery", None
+                )
+                if callable(complete_comm_recovery):
+                    complete_comm_recovery()
                 health = self._verify_plc_comm_health_checked()
 
             else:
@@ -3092,6 +3191,8 @@ class VisionApp:
         self.plc.prepare_reset(
             reset_heartbeat=reset_heartbeat
         )
+        self.plc.set_busy()
+        st.status = "PLC RESET RECOVERY: BUSY"
 
         # 조명 오류가 이미 발생한 상태에서는 통신 명령을 먼저 보내지 않는다.
         # 조명 재시작 자체가 idle 밝기 복구를 수행한다.
@@ -3167,6 +3268,29 @@ class VisionApp:
         st.camera_read_blocked = False
         st.light_error_latched = False
 
+        complete_comm_recovery = getattr(
+            self.plc, "complete_comm_recovery", None
+        )
+        if callable(complete_comm_recovery):
+            try:
+                snapshot = self.plc.get_state_snapshot()
+                if bool(snapshot.get("comm_fault_active", False)):
+                    if not complete_comm_recovery():
+                        raise RuntimeError(
+                            "PLC communication is not connected during reset"
+                        )
+            except Exception as e:
+                self._save_plc_error_event(
+                    event_type="VISION_RESET_ERROR",
+                    error_code=71,
+                    message="PLC communication recovery failed during D200=3 reset",
+                    exception=e,
+                )
+                self.plc.set_error(code=71, detail=str(e))
+                st.status = "PLC RESET ERROR: COMMUNICATION"
+                return False
+
+        self._plc_auto_reconnect_pending = False
         self.plc.reset_to_ready(
             reset_heartbeat=reset_heartbeat
         )
@@ -4047,10 +4171,14 @@ class VisionApp:
             startup_error = True
 
         try:
-            plc_status = int(
-                self.plc.get_state_snapshot().get("status", 0)
+            startup_plc_snapshot = self.plc.get_state_snapshot()
+            plc_status = int(startup_plc_snapshot.get("status", 0))
+            plc_link_verified = bool(
+                startup_plc_snapshot.get("link_verified", False)
             )
-            if plc_required and plc_status == 3:
+            if plc_required and (
+                plc_status == 3 or not plc_link_verified
+            ):
                 startup_error = True
         except Exception:
             if plc_required:
@@ -4092,6 +4220,7 @@ class VisionApp:
             self._poll_plc_error_test_request()
             self._poll_camera_process_request()
             camera_process_status = self._sync_camera_process_state()
+            self._complete_auto_plc_reconnect_if_ready()
 
             frame = None if st.camera_read_blocked else self._read_frame()
 
@@ -4246,6 +4375,7 @@ class VisionApp:
                     not plc_required
                     or (
                         bool(plc_snapshot.get("serial_open", False))
+                        and bool(plc_snapshot.get("link_verified", False))
                         and not bool(
                             plc_snapshot.get("comm_fault_active", False)
                         )
