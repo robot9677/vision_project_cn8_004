@@ -67,8 +67,8 @@
         "ramp_step_ms": 70,
         "pre_ready_settle_ms": 150,
         "pre_ready_flush_frames": 3,
-        "inspect_settle_ms": 10,
-        "inspect_flush_frames": 1,
+        "inspect_settle_ms": 250,
+        "inspect_flush_frames": 6,
         "armed_timeout_ms": 2000,
         "restore_after_inspect": true
       },
