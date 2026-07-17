@@ -63,7 +63,7 @@
           "tool": "measure.edge_energy",
           "params": {
             "ksize": 3,
-            "thresh_min": 85.0
+            "thresh_min": 80.0
           }
         }
       ],
@@ -76,6 +76,7 @@
       "roi_name": "ROI4",
       "type": "toolchain",
       "tools": [
+        
         {
           "tool": "measure.edge_energy",
           "params": {
