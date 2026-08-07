@@ -1,0 +1,29 @@
+{
+  "enabled": false,
+  "equipment_name": "",
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 465,
+    "security": "ssl",
+    "username": "",
+    "sender": "",
+    "recipients": [],
+    "password_env": "VISION_EMAIL_APP_PASSWORD",
+    "app_password": "",
+    "timeout_sec": 20
+  },
+  "startup_status": {
+    "enabled": true
+  },
+  "ng_alert": {
+    "enabled": true,
+    "delay_sec": 300,
+    "dedupe_sec": 300,
+    "image_preference": [
+      "overlay.png",
+      "raw.png"
+    ]
+  },
+  "retry_count": 2,
+  "retry_interval_sec": 30
+}

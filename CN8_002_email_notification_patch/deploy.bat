@@ -10,8 +10,8 @@ rem ============================================================
 set SSH_KEY=%USERPROFILE%\.ssh\deploy_for_gha
 
 rem ===== Change only these 2 lines per equipment source folder =====
-set "BOARD_NAME=CN8-004"
-set "TARGET=robot96@daol-vision-cheonwoo-cn8-004"
+set "BOARD_NAME=CN8-002"
+set "TARGET=robot96@daol-vision-cheonwoo-cn8-002"
 
 rem ===== Git deploy source =====
 set "GIT_REMOTE=origin"
