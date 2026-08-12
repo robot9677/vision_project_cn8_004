@@ -10,8 +10,8 @@
     "timeout": 1,
     "reconnect_interval_sec": 1.0,
     "require_reset_after_runtime_disconnect": true,
-    "require_initial_rx": true,
-    "rx_watchdog_sec": 5.0,
+    "require_initial_rx": false,
+    "rx_watchdog_sec": 0,
     "rx_watchdog_startup_grace_sec": 20.0
   },
   "modbus": {

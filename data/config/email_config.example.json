@@ -17,8 +17,8 @@
   },
   "ng_alert": {
     "enabled": true,
-    "delay_sec": 300,
-    "dedupe_sec": 300,
+    "delay_sec": 30,
+    "dedupe_sec": 30,
     "image_preference": [
       "overlay.png",
       "raw.png"
