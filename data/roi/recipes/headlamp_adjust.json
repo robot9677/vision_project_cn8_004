@@ -127,7 +127,7 @@
           "params": {
             "blur": 3,
 
-            "connector_bright_thresh": 210,
+            "connector_bright_thresh": 190,
             "connector_min_area": 19000,
             "connector_max_area": 45000,
             "connector_left_x_min": 44,
@@ -135,7 +135,7 @@
             "connector_min_h": 90,
             "connector_close": 5,
 
-            "tip_bright_thresh": 210,
+            "tip_bright_thresh": 190,
             "tip_left_min_coverage": 0.4,
 
             "tip_band_x0_ratio": 0.0,
