@@ -64,7 +64,7 @@
   "light_sets": {
     "jk_10v_single": {
       "backend": "jk_10v_modbus",
-      "port": "/dev/serial/by-path/platform-3610000.xhci-usb-0:2.1:1.0-port0",
+      "port": "/dev/serial/by-path/platform-3610000.xhci-usb-0:2.2:1.0-port0",
       "slave_id": 1,
       "baudrate": 9600,
       "timeout": 0.5,
