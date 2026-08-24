@@ -75,14 +75,6 @@
       "roi_name": "ROI4",
       "type": "toolchain",
       "tools": [
-        
-        {
-          "tool": "measure.edge_energy",
-          "params": {
-            "ksize": 3,
-            "thresh_min": 80.0
-          }
-        },
         {
           "tool": "measure.mean_raw_range",
           "params": {
