@@ -92,13 +92,6 @@
       "type": "toolchain",
       "tools": [
         {
-          "tool": "measure.edge_energy",
-          "params": {
-            "ksize": 3,
-            "thresh_min": 75.0
-          }
-        },
-        {
           "tool": "measure.mean_raw_range",
           "params": {
             "max_mean_raw": 160.0
