@@ -539,7 +539,7 @@ class Inspector:
         with open(temp_path, "w", encoding="utf-8") as file:
             json.dump(out, file, ensure_ascii=False, indent=2)
         os.replace(temp_path, final_path)
-        self._prune_full_run_dirs()
+       # self._prune_full_run_dirs()
         return run_dir
 
     # def save_recipe(path: str, recipe: Dict[str, Any]) -> None:
