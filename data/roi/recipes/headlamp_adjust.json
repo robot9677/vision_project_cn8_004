@@ -63,7 +63,7 @@
           "tool": "measure.edge_energy",
           "params": {
             "ksize": 3,
-            "thresh_max": 85.0
+            "thresh_max": 105.0
           }
         },
         {
