@@ -667,7 +667,7 @@ class Inspector:
         os.replace(temp_path, path)
 
         cfg = self.runtime_cfg.get("inspect_logging", {}) or {}
-        self._prune_logs(max_keep=max(20, int(cfg.get("summary_keep", 200))))
+        # self._prune_logs(max_keep=max(20, int(cfg.get("summary_keep", 200))))
 
     def _prune_logs(self, max_keep=200, max_mb=300):
         """Prune only inspection-owned top-level summary files.

@@ -308,7 +308,7 @@ def save_inspection_capture(
         json.dump(payload, file, ensure_ascii=False, indent=2)
     os.replace(temp_path, result_path)
 
-    _prune_inspection_capture_dirs(root_dir, keep=max(1, int(snapshot_keep)))
+    # _prune_inspection_capture_dirs(root_dir, keep=max(1, int(snapshot_keep)))
     return run_dir
 
 def handle_sample_keys(
