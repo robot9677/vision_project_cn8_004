@@ -136,7 +136,7 @@
             "connector_bright_thresh": 190,
             "connector_min_area": 19000,
             "connector_max_area": 45000,
-            "connector_left_x_min": 44,
+            "connector_left_x_min": 42,
             "connector_min_w": 70,
             "connector_min_h": 90,
             "connector_close": 5,
@@ -150,9 +150,9 @@
             "tip_band_h_ratio": 0.1,
 
             "tip_left_gap_min": 0.0,
-            "tip_left_gap_max": 3.5,
+            "tip_left_gap_max": 4.5,
             "tip_left_norm_min": -0.015,
-            "tip_left_norm_max": 0.022
+            "tip_left_norm_max": 0.028
           }
         }
       ],
