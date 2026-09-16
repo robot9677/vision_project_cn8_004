@@ -157,6 +157,22 @@
         }
       ],
       "tool_decision": "all_ok"
+    },
+    {
+      "id": "main_bracket_presence",
+      "enabled": true,
+      "roi_id": 8,
+      "roi_name": "ROI8",
+      "type": "toolchain",
+      "tools": [
+        {
+          "tool": "measure.mean_raw_range",
+          "params": {
+            "min_mean_raw": 220.0
+          }
+        }
+      ],
+      "tool_decision": "all_ok"
     }
   ]
 }
