@@ -23,6 +23,9 @@ from inspection.engine.inspect_roi_loop import process_all_rois
 from inspection.engine.decision_engine import decide_overall
 from inspection.engine.job_executor import execute_inspection_job
 from inspection.engine.result_model import ROIResult
+# ===== START 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
+from inspection.log_archive_manager import InspectionLogArchiveManager
+# ===== END 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
 
 
 def _json_safe_value(value):
@@ -241,6 +244,23 @@ class Inspector:
             self.baseline = None
 
         self._roi_debug_window_init = False
+        # ===== START 2026-09-16 : 검사결과 저장/로그백업 공통 안정화 =====
+        equipment_cfg_path = os.path.join(PROJECT_ROOT, "data", "config", "equipment_config.json")
+        try:
+            with open(equipment_cfg_path, encoding="utf-8") as f:
+                equipment_cfg = json.load(f)
+        except Exception:
+            equipment_cfg = {}
+        self.log_archive = InspectionLogArchiveManager(
+            logs_root=self.logs_root,
+            project_root=PROJECT_ROOT,
+            equipment_name=equipment_cfg.get("equipment_name", "VISION"),
+            keep_days=int(equipment_cfg.get("inspection_day_keep", 20)),
+        )
+        # ZIP 생성과 Drive 통신은 main_vp의 daemon worker에서만 수행한다.
+        # Inspector 생성 과정은 카메라/PLC 시작을 지연시키지 않는다.
+        self.email_notifier = None
+        # ===== END 2026-09-16 : 검사결과 저장/로그백업 공통 안정화 =====
         self._save_run_counter = 0
 
         register_enhance_tools()
@@ -445,102 +465,34 @@ class Inspector:
         )
         return overall_ok, results
 
-    def _should_save_full_run(self, overall_ok: bool) -> bool:
-        self._save_run_counter += 1
-        if not bool(overall_ok):
-            return True
-
-        cfg = self.runtime_cfg.get("inspect_logging", {}) or {}
-        soak_active = bool(self.runtime_cfg.get("_service_soak_active", False))
-        every = int(
-            cfg.get(
-                "soak_ok_full_every" if soak_active else "ok_full_every",
-                120 if soak_active else 20,
-            )
-        )
-        every = max(1, every)
-        return self._save_run_counter == 1 or (self._save_run_counter % every) == 0
-
-    def _prune_full_run_dirs(self):
-        cfg = self.runtime_cfg.get("inspect_logging", {}) or {}
-        max_runs = max(1, int(cfg.get("max_full_runs", 30)))
-        items = []
-        try:
-            for day_name in os.listdir(self.logs_root):
-                day_path = os.path.join(self.logs_root, day_name)
-                if not (os.path.isdir(day_path) and day_name.isdigit() and len(day_name) == 8):
-                    continue
-                for run_name in os.listdir(day_path):
-                    run_path = os.path.join(day_path, run_name)
-                    if not os.path.isdir(run_path):
-                        continue
-                    result_path = os.path.join(run_path, "result.json")
-                    if not os.path.isfile(result_path):
-                        continue
-                    try:
-                        items.append((os.path.getmtime(run_path), run_path))
-                    except OSError:
-                        pass
-            items.sort(reverse=True)
-            for _, path in items[max_runs:]:
-                for root, dirs, files in os.walk(path, topdown=False):
-                    for filename in files:
-                        try:
-                            os.remove(os.path.join(root, filename))
-                        except OSError:
-                            pass
-                    for dirname in dirs:
-                        try:
-                            os.rmdir(os.path.join(root, dirname))
-                        except OSError:
-                            pass
-                try:
-                    os.rmdir(path)
-                except OSError:
-                    pass
-        except Exception as e:
-            print("[INSPECT LOG] prune failed:", e)
-
+    # ===== START 2026-09-16 : 검사결과 저장/로그백업 공통 안정화 =====
     def save_run(self, frame_gray8: np.ndarray, overlay_bgr: np.ndarray, overall_ok: bool, results: Dict[str, ROIResult]) -> str:
-        # Keep every NG, but only a small number of OK comparison images.
-        # The separate soak JSONL still records every overnight cycle.
-        if not self._should_save_full_run(overall_ok):
-            return ""
-
-        day = time.strftime("%Y%m%d")
-        ts = time.strftime("%H%M%S")
-        mmm = int((time.time() * 1000) % 1000)
-        run_dir = os.path.join(self.logs_root, day, f"{ts}_{mmm:03d}")
-        os.makedirs(run_dir, exist_ok=True)
-
-        cv2.imwrite(os.path.join(run_dir, "raw.png"), frame_gray8)
-        cv2.imwrite(os.path.join(run_dir, "overlay.png"), overlay_bgr)
+        """Save every OK/NG inspection. overlay_bgr is intentionally not persisted."""
+        # run_inspect_once()가 실제 판정에 사용한 평균 프레임을 직접 전달한다.
+        # 제거된 4K 전용 속성(last_inspection_frame_gray8,
+        # _inspection_scale_x/y)을 참조하면 RAW/결과 저장이 전부 실패한다.
+        inspection_frame = frame_gray8
 
         out = {
             "overall_ok": bool(overall_ok),
             "ts": time.time(),
             "soak_test": bool(self.runtime_cfg.get("_service_soak_active", False)),
+            "frame_info": {
+                "roi_coordinate_width": int(self.roi_mgr.W),
+                "roi_coordinate_height": int(self.roi_mgr.H),
+                "inspection_width": int(inspection_frame.shape[1]),
+                "inspection_height": int(inspection_frame.shape[0]),
+            },
             "results": {
                 k: {
-                    "roi_id": str(v.roi_id),
-                    "ok": bool(v.ok),
-                    "reason": v.reason,
-                    "metrics": {
-                        k2: _json_safe_value(v2)
-                        for k2, v2 in v.metrics.items()
-                        if not isinstance(v2, np.ndarray)
-                    },
-                }
-                for k, v in results.items()
+                    "roi_id": str(v.roi_id), "ok": bool(v.ok), "reason": v.reason,
+                    "metrics": {k2: _json_safe_value(v2) for k2, v2 in v.metrics.items() if not isinstance(v2, np.ndarray)},
+                } for k, v in results.items()
             },
         }
-        final_path = os.path.join(run_dir, "result.json")
-        temp_path = final_path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as file:
-            json.dump(out, file, ensure_ascii=False, indent=2)
-        os.replace(temp_path, final_path)
-       # self._prune_full_run_dirs()
-        return run_dir
+        raw_path, _result_path, _day_dir = self.log_archive.save_run(inspection_frame, overall_ok, results, out)
+        return raw_path
+    # ===== END 2026-09-16 : 검사결과 저장/로그백업 공통 안정화 =====
 
     # def save_recipe(path: str, recipe: Dict[str, Any]) -> None:
     #     import os, json
@@ -633,69 +585,11 @@ class Inspector:
         if getattr(self, "aligner", None) is not None:
             self.aligner.reset_templates()
 
+    # ===== START 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
     def log_result(self, overall_ok, results):
-        os.makedirs(self.logs_root, exist_ok=True)
-        now = time.time()
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        mmm = int((now * 1000) % 1000)
-        path = os.path.join(self.logs_root, f"inspect_{ts}_{mmm:03d}.json")
-
-        payload = {
-            "ts": f"{ts}_{mmm:03d}",
-            "epoch": now,
-            "overall_ok": bool(overall_ok),
-            "soak_test": bool(self.runtime_cfg.get("_service_soak_active", False)),
-            "results": {
-                str(k): {
-                    "ok": bool(v.ok) if hasattr(v, "ok") else bool(v.get("ok")),
-                    "reason": (v.reason if hasattr(v, "reason") else v.get("reason", "")),
-                    "metrics": {
-                        str(mk): _json_safe_value(mv)
-                        for mk, mv in (
-                            (v.metrics if hasattr(v, "metrics") else v.get("metrics", {}))
-                            or {}
-                        ).items()
-                        if not isinstance(mv, np.ndarray) and not str(mk).startswith("_")
-                    },
-                }
-                for k, v in (results or {}).items()
-            },
-        }
-        temp_path = path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as file:
-            json.dump(payload, file, ensure_ascii=False, indent=2)
-        os.replace(temp_path, path)
-
-        cfg = self.runtime_cfg.get("inspect_logging", {}) or {}
-        # self._prune_logs(max_keep=max(20, int(cfg.get("summary_keep", 200))))
-
-    def _prune_logs(self, max_keep=200, max_mb=300):
-        """Prune only inspection-owned top-level summary files.
-
-        Older code recursively deleted arbitrary files below data/logs when the
-        size limit was exceeded, which could remove PLC errors, service tests
-        and diagnostics. Full run directories are pruned separately by
-        _prune_full_run_dirs().
-        """
-        try:
-            os.makedirs(self.logs_root, exist_ok=True)
-            jsons = []
-            for filename in os.listdir(self.logs_root):
-                if not (filename.startswith("inspect_") and filename.endswith(".json")):
-                    continue
-                path = os.path.join(self.logs_root, filename)
-                if os.path.isfile(path):
-                    jsons.append(path)
-
-            jsons.sort(key=lambda path: os.path.getmtime(path), reverse=True)
-            for path in jsons[int(max_keep):]:
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-        except Exception as e:
-            print("[INSPECT LOG] summary prune failed:", e)
-
+        # Detailed inspect logs are separated from raw/result evidence.
+        return self.log_archive.save_inspect_summary(overall_ok, results)
+    # ===== END 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
 
     def _check_baseline(self, roi_id, metrics):
         if not self.baseline:

@@ -50,6 +50,9 @@ from ui.control_bar import render_control_bar, key_to_cmd, button_id_to_cmd
 from app.command_executor import execute_command
 from inspection.inspect_service import run_inspect_once
 from email_notifier import EmailNotifier
+# ===== START 2026-08-26 : Google Drive 일일 로그 백업 =====
+from inspection.google_drive_backup import GoogleDriveBackupUploader
+# ===== END 2026-08-26 : Google Drive 일일 로그 백업 =====
 from modes.run_renderer import draw_run_tracking
 from runtime.runtime_config_loader import load_runtime_config
 from runtime.service_soak_test import ServiceSoakTest
@@ -393,6 +396,9 @@ class VisionApp:
                 ),
                 logs_root=LOGS_ROOT,
                 static_context={
+                    # ===== START 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
+                    "equipment_name": self.inspector.log_archive.equipment_name,
+                    # ===== END 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
                     "profile_name": profile_name,
                     "recipe_name": recipe_name,
                     "recipe_path": selected_recipe_path,
@@ -407,6 +413,101 @@ class VisionApp:
             self.inspector.email_notifier = self.email_notifier
         except Exception as e:
             print("[EMAIL] notifier setup failed:", e)
+            self.inspector.email_notifier = None
+
+        # ===== START 2026-09-16 : Google Drive 일일 백업 공통 안정화 =====
+        # ZIP/Drive 작업은 검사 시작 경로와 분리한다. 가장 최근의 완료된
+        # 과거 검사일만 대상으로 하며, 성공 마커가 있으면 ZIP과 네트워크
+        # 작업을 반복하지 않는다. 실패한 경우에만 5분 뒤 재시도한다.
+        def _daily_drive_backup_worker():
+            retry_sec = 300
+            last_failure_signature = ""
+
+            while True:
+                target_day = ""
+                txt_path = ""
+                zip_path = ""
+
+                try:
+                    archive = self.inspector.log_archive
+                    target_day = archive.latest_previous_day()
+
+                    if target_day and not archive.is_day_uploaded(target_day):
+                        txt_path, zip_path = archive.finalize_day(target_day)
+                        if not txt_path or not zip_path:
+                            raise RuntimeError(
+                                "daily archive creation returned no file: "
+                                + target_day
+                            )
+
+                        uploader = GoogleDriveBackupUploader(
+                            token_path=os.path.join(
+                                DATA_DIR,
+                                "config",
+                                "google_drive_token.json",
+                            ),
+                            root_folder_name="CN8_VISION_BACKUP",
+                            equipment_name=archive.equipment_name,
+                        )
+                        result = uploader.upload(zip_path)
+                        status = str((result or {}).get("status", ""))
+                        if status not in (
+                            "uploaded",
+                            "updated",
+                            "already_uploaded",
+                            "local_already_uploaded",
+                        ):
+                            raise RuntimeError(
+                                "unexpected Google Drive result: " + repr(result)
+                            )
+
+                        print(
+                            "[INSPECT ARCHIVE] Google Drive backup OK:",
+                            result,
+                        )
+                        archive.prune_day_dirs()
+                        last_failure_signature = ""
+
+                        if self.email_notifier is not None:
+                            self.email_notifier.send_daily_backup_status(
+                                txt_path,
+                                zip_path,
+                                drive_result=result,
+                            )
+                except Exception as archive_error:
+                    signature = "{}:{}".format(
+                        target_day,
+                        str(archive_error),
+                    )
+                    print(
+                        "[INSPECT ARCHIVE] Google Drive backup failed:",
+                        archive_error,
+                    )
+
+                    # 같은 장애가 지속될 때 5분마다 실패 메일이 쌓이지 않게
+                    # 하되, 콘솔 로그와 실제 재시도는 계속 유지한다.
+                    if (
+                        signature != last_failure_signature
+                        and self.email_notifier is not None
+                    ):
+                        try:
+                            self.email_notifier.send_daily_backup_status(
+                                txt_path,
+                                zip_path,
+                                error=str(archive_error),
+                            )
+                        except Exception:
+                            pass
+                    last_failure_signature = signature
+
+                time.sleep(retry_sec)
+
+        threading.Thread(
+            target=_daily_drive_backup_worker,
+            daemon=True,
+            name="daily-drive-backup",
+        ).start()
+        # ===== END 2026-09-16 : Google Drive 일일 백업 공통 안정화 =====
 
         self.editor.on_select_changed = self.inspector.reset_tracker_template
 

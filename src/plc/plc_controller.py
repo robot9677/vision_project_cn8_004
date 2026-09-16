@@ -165,6 +165,7 @@ class ModbusRtuSlaveController:
         regs_cfg = cfg.get("registers", {}) or {}
         heartbeat_cfg = cfg.get("heartbeat", {}) or {}
         vision_ready_cfg = cfg.get("vision_ready", {}) or {}
+        # ===== START 2026-09-16 : D200 잔존 종료명령 공통 방어 =====
         command_guard_cfg = cfg.get("command_guard", {}) or {}
 
         self.port = str(serial_cfg.get("port", "/dev/ttyUSB0"))
@@ -216,6 +217,7 @@ class ModbusRtuSlaveController:
         self.require_zero_before_shutdown = bool(
             command_guard_cfg.get("require_zero_before_shutdown", True)
         )
+        # ===== END 2026-09-16 : D200 잔존 종료명령 공통 방어 =====
 
         if not 1 <= self.slave_id <= 247:
             raise ValueError(
@@ -264,8 +266,10 @@ class ModbusRtuSlaveController:
         self._last_heartbeat_ts = 0.0
 
         self._last_cmd_seen = 0
+        # ===== START 2026-09-16 : D200 잔존 종료명령 공통 방어 =====
         self._shutdown_command_armed = not self.require_zero_before_shutdown
         self._shutdown_ignore_logged = False
+        # ===== END 2026-09-16 : D200 잔존 종료명령 공통 방어 =====
 
         self._lock = threading.Lock()
         self._ser = None
@@ -902,6 +906,9 @@ class ModbusRtuSlaveController:
     def poll_command(self) -> Optional[str]:
         cmd = self._get_reg(self.reg_command)
 
+        # ===== START 2026-09-16 : D200 잔존 종료명령 공통 방어 =====
+        # 시작/재연결 뒤 D200=0을 실제 수신하기 전에는 잔존 D200=8을
+        # 무시한다. 이후 들어오는 새로운 종료 요청은 정상 처리한다.
         if cmd == self.CMD_NONE:
             if not self._shutdown_command_armed:
                 self._shutdown_command_armed = True
@@ -940,6 +947,7 @@ class ModbusRtuSlaveController:
                     ),
                 )
             return None
+        # ===== END 2026-09-16 : D200 잔존 종료명령 공통 방어 =====
 
         if cmd == self._last_cmd_seen:
             return None

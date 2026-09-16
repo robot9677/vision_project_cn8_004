@@ -56,6 +56,38 @@ class EmailNotifier:
         if not bool(overall_ok):
             self._queue_ng(results, recipe, run_dir, inspected_at)
 
+    # ===== START 2026-08-26 : Google Drive 일일 로그 백업 =====
+    def send_daily_backup_status(self, txt_path, zip_path, drive_result=None, error=""):
+        """Send only a small Drive backup status mail. Never attach the daily ZIP."""
+        if not self.enabled:
+            return
+
+        drive_result = dict(drive_result or {})
+        success = not bool(error)
+        day_name = os.path.basename(txt_path).replace(".txt", "") if txt_path else "UNKNOWN"
+        subject = self._subject(
+            "일일 검사결과 Drive 백업 {} - {}".format("완료" if success else "실패", day_name)
+        )
+        lines = [
+            "장비: {}".format(self._equipment_name()),
+            "백업 파일: {}".format(os.path.basename(zip_path) if zip_path else "-"),
+            "Google Drive 백업: {}".format("완료" if success else "실패"),
+        ]
+        if success:
+            lines.append("Drive 상태: {}".format(drive_result.get("status", "uploaded")))
+            lines.append("Drive 파일 ID: {}".format(drive_result.get("id", "-")))
+        else:
+            lines.append("오류: {}".format(str(error)))
+        body = "\n".join(lines)
+
+        def worker():
+            if self._send_mail(subject, body, ""):
+                self._log("DAILY_DRIVE_STATUS_SENT", subject)
+
+        threading.Thread(target=worker, daemon=True, name="email-daily-drive-status").start()
+
+    # ===== END 2026-08-26 : Google Drive 일일 로그 백업 =====
+
     def send_test_mail(self):
         body = "\n".join(
             [
@@ -85,7 +117,12 @@ class EmailNotifier:
             "부팅 후 첫 검사 완료 - {}".format("OK" if overall_ok else "NG")
         )
         body = self._startup_body(overall_ok, results, inspected_at)
-        if self._send_mail(subject, body, ""):
+        # ===== START 2026-08-27 : 부팅/NG 메일 수신자 분리 =====
+        startup_cfg = self.config.get("startup_status") or {}
+        recipients = startup_cfg.get("recipients")
+
+        if self._send_mail(subject, body, "", recipients=recipients):
+        # ===== END 2026-08-27 : 부팅/NG 메일 수신자 분리 =====
             self._save_json(
                 self.state_path,
                 {
@@ -159,11 +196,27 @@ class EmailNotifier:
         try:
             if delay_sec:
                 time.sleep(delay_sec)
+            # ===== START 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
             failed = self._failed_ids(results)
-            roi_text = ",".join("ROI{}".format(x) for x in failed) or "UNKNOWN"
-            subject = self._subject("NG 검사 알림 - {}".format(roi_text))
-            body = self._ng_body(results, recipe, run_dir, image_path, inspected_at)
-            if self._send_mail(subject, body, image_path):
+            labels = [self._roi_label(recipe, x) for x in failed]
+            roi_text = "_".join("ROI{}".format(x) for x in failed) or "UNKNOWN"
+            label_text = ",".join(labels) if labels else "NG"
+            subject = "{}_{:s}({}_NG)".format(self._equipment_name(), roi_text, label_text)
+            # ===== START 2026-08-27 : NG 메일 전용 검사명 표시 =====
+            body_lines = [self._equipment_name() + " 장비 NG 발생 내용", ""]
+
+            for label in labels:
+                body_lines.append("{} : NG".format(label))
+
+            body = "\n".join(body_lines)
+            # ===== END 2026-08-27 : NG 메일 전용 검사명 표시 =====
+            # ===== END 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
+            # ===== START 2026-08-27 : 부팅/NG 메일 수신자 분리 =====
+            ng_cfg = self.config.get("ng_alert") or {}
+            recipients = ng_cfg.get("recipients")
+
+            if self._send_mail(subject, body, image_path, recipients=recipients):
+            # ===== END 2026-08-27 : 부팅/NG 메일 수신자 분리 =====
                 self._log("NG_SENT", subject)
         finally:
             self._remove_staged_image(image_path)
@@ -226,17 +279,33 @@ class EmailNotifier:
             self._log("NG_IMAGE_COPY_FAILED", str(exc))
             return source
 
+    # ===== START 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
     def _pick_image(self, run_dir):
-        if not run_dir or not os.path.isdir(run_dir):
-            return ""
-        preferred = (self.config.get("ng_alert") or {}).get(
-            "image_preference", ["overlay.png", "raw.png"]
-        )
-        for name in preferred if isinstance(preferred, list) else ["overlay.png"]:
-            path = os.path.join(run_dir, str(name))
-            if os.path.isfile(path):
-                return path
+        # New logger passes the exact RAW evidence path, not a run directory.
+        if run_dir and os.path.isfile(run_dir) and run_dir.lower().endswith(".png"):
+            return run_dir
+        if run_dir and os.path.isdir(run_dir):
+            path = os.path.join(run_dir, "raw.png")
+            return path if os.path.isfile(path) else ""
         return ""
+
+    # ===== START 2026-08-27 : NG 메일 전용 검사명 분리 =====
+    @staticmethod
+    def _roi_label(recipe, roi_id):
+        for item in (recipe or {}).get("inspections") or []:
+            item_roi_id = str(
+                item.get("roi_id", item.get("roi_name", ""))
+            ).replace("ROI", "")
+
+            if item_roi_id == str(roi_id):
+                return str(
+                    item.get("email_name")
+                    or item.get("roi_name")
+                    or ("ROI" + str(roi_id))
+                )
+
+        return "ROI" + str(roi_id)
+    # ===== END 2026-08-27 : NG 메일 전용 검사명 분리 =====
 
     def _remove_staged_image(self, path):
         if not path:
@@ -252,7 +321,7 @@ class EmailNotifier:
     # ------------------------------------------------------------------
     # SMTP
     # ------------------------------------------------------------------
-    def _send_mail(self, subject, body, attachment_path):
+    def _send_mail(self, subject, body, attachment_path, recipients=None):
         try:
             smtp_cfg = self.config.get("smtp") or {}
             host = str(smtp_cfg.get("host") or "").strip()
@@ -261,7 +330,12 @@ class EmailNotifier:
             username = str(smtp_cfg.get("username") or "").strip()
             password = self._smtp_password(smtp_cfg)
             sender = str(smtp_cfg.get("sender") or username).strip()
-            recipients = self._recipients(smtp_cfg.get("recipients"))
+            # ===== START 2026-08-27 : 부팅/NG 메일 수신자 분리 =====
+            if recipients is None:
+                recipients = smtp_cfg.get("recipients")
+
+            recipients = self._recipients(recipients)
+            # ===== END 2026-08-27 : 부팅/NG 메일 수신자 분리 =====
 
             if not host or not sender or not recipients or (username and not password):
                 raise ValueError("email_config.json SMTP 항목이 완성되지 않았습니다")
@@ -283,19 +357,43 @@ class EmailNotifier:
                         filename=os.path.basename(attachment_path),
                     )
 
-            if security == "ssl":
-                with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
-                    if username:
-                        smtp.login(username, password)
-                    smtp.send_message(message)
-            else:
-                with smtplib.SMTP(host, port, timeout=20) as smtp:
-                    if security in ("tls", "starttls"):
-                        smtp.starttls()
-                    if username:
-                        smtp.login(username, password)
-                    smtp.send_message(message)
-            return True
+            # ===== START 2026-08-26 : 일일 백업 메일 안정화 =====
+            # Retry each SMTP transaction with a fresh connection. This keeps
+            # inspection independent from temporary SMTP disconnects and also
+            # makes the existing retry_count/retry_interval_sec config effective.
+            retry_count = max(0, int(self.config.get("retry_count", 2)))
+            retry_interval = max(0, int(self.config.get("retry_interval_sec", 30)))
+            timeout_sec = max(1, int(smtp_cfg.get("timeout_sec", 20)))
+            last_exc = None
+
+            for attempt in range(retry_count + 1):
+                try:
+                    if security == "ssl":
+                        with smtplib.SMTP_SSL(host, port, timeout=timeout_sec) as smtp:
+                            if username:
+                                smtp.login(username, password)
+                            smtp.send_message(message)
+                    else:
+                        with smtplib.SMTP(host, port, timeout=timeout_sec) as smtp:
+                            if security in ("tls", "starttls"):
+                                smtp.starttls()
+                            if username:
+                                smtp.login(username, password)
+                            smtp.send_message(message)
+                    if attempt:
+                        self._log("SEND_RETRY_SUCCESS", "attempt={}".format(attempt + 1))
+                    return True
+                except Exception as exc:
+                    last_exc = exc
+                    self._log(
+                        "SEND_RETRY_FAILED",
+                        "attempt={}/{} {}".format(attempt + 1, retry_count + 1, exc),
+                    )
+                    if attempt < retry_count and retry_interval:
+                        time.sleep(retry_interval)
+
+            raise last_exc if last_exc is not None else RuntimeError("SMTP send failed")
+            # ===== END 2026-08-26 : 일일 백업 메일 안정화 =====
         except Exception as exc:
             print("[EMAIL] send failed:", exc)
             self._log("SEND_FAILED", str(exc))
@@ -305,7 +403,9 @@ class EmailNotifier:
     # Small helpers
     # ------------------------------------------------------------------
     def _equipment_name(self):
-        return str(self.config.get("equipment_name") or socket.gethostname())
+        # ===== START 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
+        return str(self.context.get("equipment_name") or self.config.get("equipment_name") or socket.gethostname())
+        # ===== END 2026-08-26 : 검사결과 저장/로그백업 구조 변경 =====
 
     def _subject(self, text):
         return "[{}] {}".format(self._equipment_name(), text)

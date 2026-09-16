@@ -33,7 +33,11 @@ venv/
 # temp
 temp_clean_repo/
 clean_repo/
-
 # local email credentials (keep only example in Git)
 data/config/email_config.json
 !data/config/email_config.example.json
+
+# local Google Drive credentials
+data/config/google_drive_client.json
+data/config/google_drive_token.json
+
