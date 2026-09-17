@@ -3,7 +3,18 @@
     "type": "none"
   },
   "decision": {
-    "mode": "any_fail_is_ng"
+    "mode": "any_fail_is_ng",
+    "interlocks": [
+      {
+        "source_roi_id": 8,
+        "force_ng_roi_ids": [
+          3,
+          4,
+          5
+        ],
+        "reason": "BRACKET_MISSING"
+      }
+    ]
   },
   "inspections": [
     {
@@ -63,13 +74,14 @@
           "tool": "measure.edge_energy",
           "params": {
             "ksize": 3,
-            "thresh_max": 108.0
+            "thresh_min": 75.0
           }
         },
         {
           "tool": "measure.mean_raw_range",
           "params": {
-            "max_mean_raw": 150.0
+            "min_mean_raw": 135.0,
+            "max_mean_raw": 190.0
           }
         }
       ],
@@ -83,16 +95,17 @@
       "type": "toolchain",
       "tools": [
         {
-            "tool": "measure.edge_energy",
-            "params": {
-              "ksize": 3,
-              "thresh_min": 80.0
-            }
-          },
+          "tool": "measure.edge_energy",
+          "params": {
+            "ksize": 3,
+            "thresh_min": 50.0,
+            "thresh_max": 90.0
+          }
+        },
         {
           "tool": "measure.mean_raw_range",
           "params": {
-            "max_mean_raw": 160.0
+            "max_mean_raw": 200.0
           }
     }
       ],
@@ -109,13 +122,14 @@
           "tool": "measure.edge_energy",
           "params": {
             "ksize": 3,
-            "thresh_min": 75.0
+            "thresh_min": 60.0
           }
         },
         {
           "tool": "measure.mean_raw_range",
           "params": {
-            "max_mean_raw": 160.0
+            "min_mean_raw": 135.0,
+            "max_mean_raw": 190.0
           }
         }
       ],
